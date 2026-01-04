@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { stripe } from '@/lib/stripe'
-import { supabaseAdmin } from '@/lib/supabase-server'
+import { adminDb } from '@/lib/firebase-admin'
 import Stripe from 'stripe'
 
 export async function POST(req: NextRequest) {
@@ -62,108 +62,106 @@ export async function POST(req: NextRequest) {
 }
 
 async function handleSubscriptionUpdate(subscription: Stripe.Subscription) {
-  const { error } = await supabaseAdmin
-    .from('families')
-    .update({
-      stripe_subscription_id: subscription.id,
-      subscription_status: subscription.status === 'active' ? 'active' :
-                          subscription.status === 'past_due' ? 'past_due' : 'inactive',
-      updated_at: new Date().toISOString(),
-    })
-    .eq('stripe_customer_id', subscription.customer as string)
+  const familiesRef = adminDb.collection('families')
+  const snapshot = await familiesRef
+    .where('stripe_customer_id', '==', subscription.customer as string)
+    .limit(1)
+    .get()
 
-  if (error) {
-    console.error('Error updating subscription:', error)
-    throw error
+  if (snapshot.empty) {
+    console.error('Family not found for customer:', subscription.customer)
+    return
   }
+
+  const familyDoc = snapshot.docs[0]
+  await familyDoc.ref.update({
+    stripe_subscription_id: subscription.id,
+    subscription_status: subscription.status === 'active' ? 'active' :
+                        subscription.status === 'past_due' ? 'past_due' : 'inactive',
+    updated_at: new Date().toISOString(),
+  })
 }
 
 async function handleSubscriptionCancellation(subscription: Stripe.Subscription) {
-  const { error } = await supabaseAdmin
-    .from('families')
-    .update({
-      subscription_status: 'cancelled',
-      updated_at: new Date().toISOString(),
-    })
-    .eq('stripe_subscription_id', subscription.id)
+  const familiesRef = adminDb.collection('families')
+  const snapshot = await familiesRef
+    .where('stripe_subscription_id', '==', subscription.id)
+    .limit(1)
+    .get()
 
-  if (error) {
-    console.error('Error cancelling subscription:', error)
-    throw error
+  if (snapshot.empty) {
+    console.error('Family not found for subscription:', subscription.id)
+    return
   }
+
+  const familyDoc = snapshot.docs[0]
+  await familyDoc.ref.update({
+    subscription_status: 'cancelled',
+    updated_at: new Date().toISOString(),
+  })
 }
 
 async function handleSuccessfulPayment(invoice: Stripe.Invoice) {
   if (!invoice.subscription) return
 
-  const { data: family } = await supabaseAdmin
-    .from('families')
-    .select('id')
-    .eq('stripe_subscription_id', invoice.subscription as string)
-    .single()
+  const familiesRef = adminDb.collection('families')
+  const snapshot = await familiesRef
+    .where('stripe_subscription_id', '==', invoice.subscription as string)
+    .limit(1)
+    .get()
 
-  if (!family) {
+  if (snapshot.empty) {
     console.error('Family not found for subscription:', invoice.subscription)
     return
   }
 
+  const familyId = snapshot.docs[0].id
   const periodStart = new Date((invoice.period_start || 0) * 1000).toISOString()
   const periodEnd = new Date((invoice.period_end || 0) * 1000).toISOString()
 
-  const { error } = await supabaseAdmin
-    .from('donations')
-    .insert({
-      family_id: family.id,
-      amount: invoice.amount_paid / 100,
-      stripe_payment_intent_id: invoice.payment_intent as string,
-      stripe_invoice_id: invoice.id,
-      status: 'succeeded',
-      receipt_url: invoice.hosted_invoice_url,
-      period_start: periodStart,
-      period_end: periodEnd,
-    })
-
-  if (error) {
-    console.error('Error creating donation record:', error)
-    throw error
-  }
+  await adminDb.collection('donations').add({
+    family_id: familyId,
+    amount: invoice.amount_paid / 100,
+    stripe_payment_intent_id: invoice.payment_intent as string,
+    stripe_invoice_id: invoice.id,
+    status: 'succeeded',
+    receipt_url: invoice.hosted_invoice_url || '',
+    period_start: periodStart,
+    period_end: periodEnd,
+    created_at: new Date().toISOString(),
+  })
 }
 
 async function handleFailedPayment(invoice: Stripe.Invoice) {
   if (!invoice.subscription) return
 
-  const { data: family } = await supabaseAdmin
-    .from('families')
-    .select('id')
-    .eq('stripe_subscription_id', invoice.subscription as string)
-    .single()
+  const familiesRef = adminDb.collection('families')
+  const snapshot = await familiesRef
+    .where('stripe_subscription_id', '==', invoice.subscription as string)
+    .limit(1)
+    .get()
 
-  if (!family) return
+  if (snapshot.empty) return
 
-  const { error: familyError } = await supabaseAdmin
-    .from('families')
-    .update({
-      subscription_status: 'past_due',
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', family.id)
+  const familyDoc = snapshot.docs[0]
+  const familyId = familyDoc.id
 
-  if (familyError) {
-    console.error('Error updating family status:', familyError)
-  }
+  await familyDoc.ref.update({
+    subscription_status: 'past_due',
+    updated_at: new Date().toISOString(),
+  })
 
   const periodStart = new Date((invoice.period_start || 0) * 1000).toISOString()
   const periodEnd = new Date((invoice.period_end || 0) * 1000).toISOString()
 
-  await supabaseAdmin
-    .from('donations')
-    .insert({
-      family_id: family.id,
-      amount: invoice.amount_due / 100,
-      stripe_payment_intent_id: invoice.payment_intent as string || 'failed',
-      stripe_invoice_id: invoice.id,
-      status: 'failed',
-      period_start: periodStart,
-      period_end: periodEnd,
-    })
+  await adminDb.collection('donations').add({
+    family_id: familyId,
+    amount: invoice.amount_due / 100,
+    stripe_payment_intent_id: invoice.payment_intent as string || 'failed',
+    stripe_invoice_id: invoice.id,
+    status: 'failed',
+    period_start: periodStart,
+    period_end: periodEnd,
+    created_at: new Date().toISOString(),
+  })
 }

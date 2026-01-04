@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { stripe } from '@/lib/stripe'
-import { supabaseAdmin } from '@/lib/supabase-server'
+import { adminDb } from '@/lib/firebase-admin'
+import { Family } from '@/types/database'
 
 export async function POST(req: NextRequest) {
   try {
@@ -13,19 +14,16 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    const { data: family, error: familyError } = await supabaseAdmin
-      .from('families')
-      .select('*')
-      .eq('id', familyId)
-      .single()
+    const familyDoc = await adminDb.collection('families').doc(familyId).get()
 
-    if (familyError || !family) {
+    if (!familyDoc.exists) {
       return NextResponse.json(
         { error: 'Family not found' },
         { status: 404 }
       )
     }
 
+    const family = familyDoc.data() as Family
     let customerId = family.stripe_customer_id
 
     if (!customerId) {
@@ -38,10 +36,10 @@ export async function POST(req: NextRequest) {
       })
       customerId = customer.id
 
-      await supabaseAdmin
-        .from('families')
-        .update({ stripe_customer_id: customerId })
-        .eq('id', familyId)
+      await familyDoc.ref.update({
+        stripe_customer_id: customerId,
+        updated_at: new Date().toISOString(),
+      })
     }
 
     const session = await stripe.checkout.sessions.create({

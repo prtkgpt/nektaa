@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { stripe } from '@/lib/stripe'
-import { supabaseAdmin } from '@/lib/supabase-server'
+import { adminDb } from '@/lib/firebase-admin'
+import { Family } from '@/types/database'
 
 export async function POST(req: NextRequest) {
   try {
@@ -13,13 +14,18 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    const { data: family, error: familyError } = await supabaseAdmin
-      .from('families')
-      .select('stripe_subscription_id')
-      .eq('id', familyId)
-      .single()
+    const familyDoc = await adminDb.collection('families').doc(familyId).get()
 
-    if (familyError || !family || !family.stripe_subscription_id) {
+    if (!familyDoc.exists) {
+      return NextResponse.json(
+        { error: 'No active subscription found' },
+        { status: 404 }
+      )
+    }
+
+    const family = familyDoc.data() as Family
+
+    if (!family.stripe_subscription_id) {
       return NextResponse.json(
         { error: 'No active subscription found' },
         { status: 404 }
@@ -28,13 +34,10 @@ export async function POST(req: NextRequest) {
 
     await stripe.subscriptions.cancel(family.stripe_subscription_id)
 
-    await supabaseAdmin
-      .from('families')
-      .update({
-        subscription_status: 'cancelled',
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', familyId)
+    await familyDoc.ref.update({
+      subscription_status: 'cancelled',
+      updated_at: new Date().toISOString(),
+    })
 
     return NextResponse.json({ success: true })
   } catch (error: any) {
