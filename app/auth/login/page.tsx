@@ -1,8 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { auth } from '@/lib/firebase'
-import { signInWithEmailAndPassword } from 'firebase/auth'
+import { supabase } from '@/lib/supabase'
 import { useRouter } from 'next/navigation'
 
 export default function LoginPage() {
@@ -18,7 +17,13 @@ export default function LoginPage() {
     setError(null)
 
     try {
-      await signInWithEmailAndPassword(auth, email, password)
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      })
+
+      if (error) throw error
+
       router.push('/dashboard')
     } catch (error: any) {
       setError(error.message)

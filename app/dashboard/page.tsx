@@ -1,11 +1,12 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { auth, db } from '@/lib/firebase'
-import { onAuthStateChanged, signOut } from 'firebase/auth'
-import { doc, getDoc, collection, query, where, orderBy, limit, getDocs } from 'firebase/firestore'
+import { supabase } from '@/lib/supabase'
 import { useRouter } from 'next/navigation'
-import { Family, Donation } from '@/types/database'
+import { Database } from '@/types/database'
+
+type Family = Database['public']['Tables']['families']['Row']
+type Donation = Database['public']['Tables']['donations']['Row']
 
 export default function DashboardPage() {
   const [family, setFamily] = useState<Family | null>(null)
@@ -15,53 +16,41 @@ export default function DashboardPage() {
   const router = useRouter()
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      if (!user) {
-        router.push('/auth/login')
-        return
-      }
+    checkUser()
+  }, [])
 
-      await loadFamilyData(user.uid)
-    })
+  const checkUser = async () => {
+    const { data: { user } } = await supabase.auth.getUser()
 
-    return () => unsubscribe()
-  }, [router])
-
-  const loadFamilyData = async (userId: string) => {
-    try {
-      const familyDoc = await getDoc(doc(db, 'families', userId))
-
-      if (familyDoc.exists()) {
-        const familyData = { id: familyDoc.id, ...familyDoc.data() } as Family
-        setFamily(familyData)
-        await loadDonations(familyDoc.id)
-      }
-    } catch (error) {
-      console.error('Error loading family data:', error)
-    } finally {
-      setLoading(false)
+    if (!user) {
+      router.push('/auth/login')
+      return
     }
+
+    const { data: familyData } = await supabase
+      .from('families')
+      .select('*')
+      .eq('user_id', user.id)
+      .single()
+
+    if (familyData) {
+      setFamily(familyData)
+      loadDonations(familyData.id)
+    }
+
+    setLoading(false)
   }
 
   const loadDonations = async (familyId: string) => {
-    try {
-      const donationsRef = collection(db, 'donations')
-      const q = query(
-        donationsRef,
-        where('family_id', '==', familyId),
-        orderBy('created_at', 'desc'),
-        limit(10)
-      )
+    const { data } = await supabase
+      .from('donations')
+      .select('*')
+      .eq('family_id', familyId)
+      .order('created_at', { ascending: false })
+      .limit(10)
 
-      const snapshot = await getDocs(q)
-      const donationsList = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      })) as Donation[]
-
-      setDonations(donationsList)
-    } catch (error) {
-      console.error('Error loading donations:', error)
+    if (data) {
+      setDonations(data)
     }
   }
 
@@ -103,9 +92,7 @@ export default function DashboardPage() {
       })
 
       alert('Subscription cancelled successfully')
-      if (auth.currentUser) {
-        await loadFamilyData(auth.currentUser.uid)
-      }
+      checkUser()
     } catch (error) {
       console.error('Error:', error)
       alert('Failed to cancel subscription')
@@ -115,7 +102,7 @@ export default function DashboardPage() {
   }
 
   const handleSignOut = async () => {
-    await signOut(auth)
+    await supabase.auth.signOut()
     router.push('/')
   }
 

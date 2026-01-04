@@ -1,11 +1,12 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { auth, db } from '@/lib/firebase'
-import { onAuthStateChanged, signOut } from 'firebase/auth'
-import { collection, getDocs, doc, getDoc, query, where, orderBy, limit as firestoreLimit } from 'firebase/firestore'
+import { supabase } from '@/lib/supabase'
 import { useRouter } from 'next/navigation'
-import { Family, Donation } from '@/types/database'
+import { Database } from '@/types/database'
+
+type Family = Database['public']['Tables']['families']['Row']
+type Donation = Database['public']['Tables']['donations']['Row']
 
 interface FamilyWithDonations extends Family {
   total_donations: number
@@ -21,70 +22,49 @@ export default function AdminPage() {
   const router = useRouter()
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      if (!user) {
-        router.push('/auth/login')
-        return
-      }
+    checkAdmin()
+  }, [])
 
-      await checkAdmin(user.uid)
-    })
+  const checkAdmin = async () => {
+    const { data: { user } } = await supabase.auth.getUser()
 
-    return () => unsubscribe()
-  }, [router])
-
-  const checkAdmin = async (userId: string) => {
-    try {
-      const familyDoc = await getDoc(doc(db, 'families', userId))
-
-      if (!familyDoc.exists() || !familyDoc.data()?.is_admin) {
-        router.push('/dashboard')
-        return
-      }
-
-      setIsAdmin(true)
-      await loadData()
-    } catch (error) {
-      console.error('Error checking admin status:', error)
-      router.push('/dashboard')
+    if (!user) {
+      router.push('/auth/login')
+      return
     }
+
+    const { data: familyData } = await supabase
+      .from('families')
+      .select('is_admin')
+      .eq('user_id', user.id)
+      .single()
+
+    if (!familyData?.is_admin) {
+      router.push('/dashboard')
+      return
+    }
+
+    setIsAdmin(true)
+    loadData()
   }
 
   const loadData = async () => {
-    try {
-      const familiesSnapshot = await getDocs(collection(db, 'families'))
-      const donationsSnapshot = await getDocs(
-        query(
-          collection(db, 'donations'),
-          orderBy('created_at', 'desc'),
-          firestoreLimit(50)
-        )
-      )
+    const [familiesResult, donationsResult] = await Promise.all([
+      supabase.from('families').select('*').order('created_at', { ascending: false }),
+      supabase.from('donations').select('*').order('created_at', { ascending: false }).limit(50)
+    ])
 
-      const familiesList = familiesSnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      })) as Family[]
+    if (familiesResult.data) {
+      const familiesWithStats = await Promise.all(
+        familiesResult.data.map(async (family) => {
+          const { data: familyDonations } = await supabase
+            .from('donations')
+            .select('amount, created_at')
+            .eq('family_id', family.id)
+            .eq('status', 'succeeded')
 
-      const donationsList = donationsSnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      })) as Donation[]
-
-      const familiesWithStats: FamilyWithDonations[] = await Promise.all(
-        familiesList.map(async (family) => {
-          const familyDonationsQuery = query(
-            collection(db, 'donations'),
-            where('family_id', '==', family.id),
-            where('status', '==', 'succeeded'),
-            orderBy('created_at', 'desc')
-          )
-
-          const familyDonationsSnapshot = await getDocs(familyDonationsQuery)
-          const familyDonations = familyDonationsSnapshot.docs.map(doc => doc.data() as Donation)
-
-          const totalDonations = familyDonations.reduce((sum, d) => sum + Number(d.amount), 0)
-          const lastDonationDate = familyDonations.length > 0 ? familyDonations[0].created_at : null
+          const totalDonations = familyDonations?.reduce((sum, d) => sum + Number(d.amount), 0) || 0
+          const lastDonationDate = familyDonations?.[0]?.created_at || null
 
           return {
             ...family,
@@ -95,16 +75,17 @@ export default function AdminPage() {
       )
 
       setFamilies(familiesWithStats)
-      setDonations(donationsList)
-    } catch (error) {
-      console.error('Error loading data:', error)
-    } finally {
-      setLoading(false)
     }
+
+    if (donationsResult.data) {
+      setDonations(donationsResult.data)
+    }
+
+    setLoading(false)
   }
 
   const handleSignOut = async () => {
-    await signOut(auth)
+    await supabase.auth.signOut()
     router.push('/')
   }
 

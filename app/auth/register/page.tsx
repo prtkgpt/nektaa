@@ -1,9 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { auth, db } from '@/lib/firebase'
-import { createUserWithEmailAndPassword } from 'firebase/auth'
-import { doc, setDoc } from 'firebase/firestore'
+import { supabase } from '@/lib/supabase'
 import { useRouter } from 'next/navigation'
 
 export default function RegisterPage() {
@@ -22,21 +20,26 @@ export default function RegisterPage() {
     setError(null)
 
     try {
-      const userCredential = await createUserWithEmailAndPassword(auth, email, password)
-      const user = userCredential.user
-
-      await setDoc(doc(db, 'families', user.uid), {
-        id: user.uid,
-        user_id: user.uid,
-        family_name: familyName,
-        contact_email: email,
-        contact_phone: contactPhone || '',
-        monthly_amount: parseFloat(monthlyAmount),
-        subscription_status: 'inactive',
-        is_admin: false,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+      const { data: authData, error: authError } = await supabase.auth.signUp({
+        email,
+        password,
       })
+
+      if (authError) throw authError
+      if (!authData.user) throw new Error('Registration failed')
+
+      const { error: familyError } = await supabase
+        .from('families')
+        .insert({
+          user_id: authData.user.id,
+          family_name: familyName,
+          contact_email: email,
+          contact_phone: contactPhone || null,
+          monthly_amount: parseFloat(monthlyAmount),
+          subscription_status: 'inactive',
+        })
+
+      if (familyError) throw familyError
 
       router.push('/dashboard')
     } catch (error: any) {
